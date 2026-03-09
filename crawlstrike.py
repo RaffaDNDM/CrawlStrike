@@ -5,6 +5,7 @@ from urllib.parse import urljoin, urlparse
 from collections import deque, defaultdict
 import argparse
 from termcolor import colored
+import os
 
 ABSOLUTE_URL_PATTERN = r'https?://[^\s"\'<>]+'
 RELATIVE_PATTERN = r'["\'](\/[a-zA-Z0-9_\-\/\.]+)["\']'
@@ -100,6 +101,7 @@ def main():
     parser.add_argument("--proxy", help="Proxy (http://127.0.0.1:8080)")
     parser.add_argument("-f", "--domain-filter", help="Extra domain filter")
     parser.add_argument("-sc", action="store_true", help="Generate files with identified links, grouped by status codes (i.e. 2xx.txt, 3xx.txt, error.txt)")
+    parser.add_argument("--output", help="Output folder (default: current folder)")
     parser.add_argument("url", help="Starting URL")
     args = parser.parse_args()
 
@@ -122,11 +124,16 @@ def main():
         proxy_url = args.proxy
         if not proxy_url.startswith(("http://", "https://")):
             proxy_url = "http://" + proxy_url
-        client_args["proxies"] = proxy_url
+        client_args["proxy"] = proxy_url
         print(f"[+] Using proxy: {proxy_url}")
 
-    session = httpx.Client(**client_args)
+    output_folder = '.'
 
+    if args.output:
+        output_folder = args.output
+        os.makedirs(output_folder, exist_ok=True)
+
+    session = httpx.Client(**client_args)
 
     visited = set()
     queue = deque([START_URL])
@@ -187,7 +194,7 @@ def main():
     print("\n==== FOUND LINKS ====\n")
 
     if SHOW_STATUS:
-        with open("2xx.txt", "w") as f2xx, open("3xx.txt", "w") as f3xx, open("error.txt", "w") as ferr, open("skipped.txt", "w") as fskip:
+        with open(os.path.join(output_folder,"2xx.txt"), "w", encoding="utf-8") as f2xx, open(os.path.join(output_folder,"3xx.txt"), "w", encoding="utf-8") as f3xx, open(os.path.join(output_folder,"error.txt"), "w", encoding="utf-8") as ferr, open(os.path.join(output_folder,"skipped.txt"), "w", encoding="utf-8") as fskip:
             for link, sources in found_links.items():
                 parsed = urlparse(link)
                 netloc = parsed.netloc.lower()
@@ -211,7 +218,7 @@ def main():
                         print(f"\tFound on: {src}")
 
     fds={}
-    with open("in_scope.txt", "w") as fds["green"], open("oos.txt", "w") as fds["red"], open("subdomains_filter.txt", "w") as fds["yellow"]:
+    with open(os.path.join(output_folder,"in_scope.txt"), "w", encoding="utf-8") as fds["green"], open(os.path.join(output_folder,"oos.txt"), "w", encoding="utf-8") as fds["red"], open(os.path.join(output_folder,"subdomains_filter.txt"), "w", encoding="utf-8") as fds["yellow"]:
 
         for link, sources in found_links.items():
             color = get_link_color(link, status_codes, base_domain, args.domain_filter)

@@ -25,7 +25,7 @@ pip3 install -r requirements.txt
 
 # Usage
 ```bash
-python3 crawlstrike.py [--source] [--proxy PROXY] [-f DOMAIN_FILTER] [-sc] url
+python3 crawlstrike.py [--source] [--proxy PROXY] [-f DOMAIN_FILTER] [-sc] [--output OUTPUT] url
 ```
 
 ## Example
@@ -37,9 +37,10 @@ python crawlstrike.py https://example.com
 | **Argument** | **Description** |
 | ------------ | --------------- |
 | `--source` | Show source pages for each identified url |
-| `--proxy PROXY` | Forward request to a proxy (`http://127.0.0.1:8080`)
+| `--proxy PROXY` | Forward request to a proxy (`http://127.0.0.1:8080`) |
 | `-f DOMAIN_FILTER`, `--domain-filter DOMAIN_FILTER` | Extra domain filter |
 | `-sc` | Generate files with identified links, grouped by status codes (i.e. `2xx.txt`, `3xx.txt`, `error.txt`, `skipped.txt`) |
+| `--output OUTPUT` | Output folder |
 
 # TO DO
 - Multiple input analysis (via URLs in input TXT file)
