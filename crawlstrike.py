@@ -2,247 +2,285 @@ import re
 import httpx
 from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
-from collections import deque, defaultdict
 import argparse
 from termcolor import colored
 import os
+import pickle
+import signal
+import time
+from multiprocessing import Process, Manager, Queue, cpu_count, Event
+import queue as queue_module
+import pyfiglet
 
+# -------------------------
+# Constants
+# -------------------------
 ABSOLUTE_URL_PATTERN = r'https?://[^\s"\'<>]+'
 RELATIVE_PATTERN = r'["\'](\/[a-zA-Z0-9_\-\/\.]+)["\']'
 PARENT_REL_PATTERN = r'["\'](\.\.\/[a-zA-Z0-9_\-\/\.]+)["\']'
 
-def get_status_color(status_code):
-    if isinstance(status_code, int):
-        if 200 <= status_code < 300:
-            return "green"
-        elif 300 <= status_code < 400:
-            return "yellow"
-        else:
-            return "red"
-    return "red"
+# -------------------------
+# State handling
+# -------------------------
+def save_state(visited, status_codes, pending_list, filename):
+    state = {
+        "visited": dict(visited),
+        "status_codes": dict(status_codes),
+        "queue": list(pending_list)
+    }
+    with open(filename, "wb") as f:
+        pickle.dump(state, f)
+    print(colored(f"\n[+] State saved to {filename} ({len(state['visited'])} visited, {len(state['queue'])} pending)", "cyan"))
 
+def load_state(filename):
+    state = None
+    if os.path.exists(filename):
+        choice = ''
+        while choice.lower() not in ['y', 'n']:
+            choice = input(f"{colored(filename, 'yellow')} exists. Do you want to resume it (y/n)? ")
+
+        if choice.lower() == 'y':
+            with open(filename, "rb") as f:
+                state = pickle.load(f)
+                print(colored(f"[+] Resuming previous scan ({len(state['visited'])} visited)", "cyan"))
+        else:
+            os.remove(filename)
+    
+    return state
+
+# -------------------------
+# Utilities
+# -------------------------
 def normalize(url):
     parsed = urlparse(url)
     return parsed._replace(fragment="").geturl()
 
-def is_in_scope(netloc, base_domain):
-    netloc = netloc.lower().split(":")[0]
+def get_status_color(code):
+    if isinstance(code, int):
+        if 200 <= code < 300: return "green"
+        elif 300 <= code < 400: return "yellow"
+        else: return "red"
+    return "red"
 
-    if netloc == base_domain:
-        return True
-    if netloc.endswith("." + base_domain):
-        return True
+def is_in_scope(netloc, base_domain, allow_subdomains=True):
+    netloc = netloc.lower().split(":")[0]
+    if netloc == base_domain: return True
+    if allow_subdomains and netloc.endswith("." + base_domain): return True
     return False
 
-def add_link(link, source_url, base_domain, found_links, visited, queue):
+def add_link(link, base_domain, visited, queue, pending_list, allow_subdomains):
     link = normalize(link)
-    found_links[link].add(source_url)
-
     parsed = urlparse(link)
+    if is_in_scope(parsed.netloc, base_domain, allow_subdomains):
+        # We check the dict to see if it exists at all
+        if link not in visited:
+            visited[link] = False # Mark as discovered but not processed
+            pending_list.append(link)
+            queue.put(link)
 
-    if is_in_scope(parsed.netloc, base_domain):
-        if link not in visited and link not in queue:
-            queue.append(link)
-
-def extract_with_regex(content, base_url, base_domain, found_links, visited, queue):
+# -------------------------
+# Extraction
+# -------------------------
+def extract_content(content, content_type, url, base_domain, visited, queue, pending_list, allow_subdomains):
     for match in re.findall(ABSOLUTE_URL_PATTERN, content):
-        add_link(match, base_url, base_domain, found_links, visited, queue)
-
+        add_link(match, base_domain, visited, queue, pending_list, allow_subdomains)
     for match in re.findall(RELATIVE_PATTERN, content):
-        add_link(urljoin(base_url, match), base_url, base_domain, found_links, visited, queue)
-
+        add_link(urljoin(url, match), base_domain, visited, queue, pending_list, allow_subdomains)
     for match in re.findall(PARENT_REL_PATTERN, content):
-        add_link(urljoin(base_url, match), base_url, base_domain, found_links, visited, queue)
+        add_link(urljoin(url, match), base_domain, visited, queue, pending_list, allow_subdomains)
+    
+    if "html" in content_type:
+        soup = BeautifulSoup(content, "html.parser")
+        tags_attrs = {"a":"href","script":"src","link":"href","iframe":"src","img":"src","form":"action"}
+        for tag, attr in tags_attrs.items():
+            for element in soup.find_all(tag):
+                val = element.get(attr)
+                if val:
+                    add_link(urljoin(url, val), base_domain, visited, queue, pending_list, allow_subdomains)
 
-def extract_with_bs4(soup, base_url, base_domain, found_links, visited, queue):
-    tags_attrs = {
-        "a": "href",
-        "script": "src",
-        "link": "href",
-        "iframe": "src",
-        "img": "src",
-        "form": "action"
+# -------------------------
+# Result writer
+# -------------------------
+def result_writer(results_queue, output_folder):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
+    
+    files = {
+        "2xx": open(os.path.join(output_folder, "2xx.txt"), "a"),
+        "3xx": open(os.path.join(output_folder, "3xx.txt"), "a"),
+        "4xx": open(os.path.join(output_folder, "4xx.txt"), "a"),
+        "5xx": open(os.path.join(output_folder, "5xx.txt"), "a"),
+        "err": open(os.path.join(output_folder, "error.txt"), "a")
     }
-
-    for tag, attr in tags_attrs.items():
-        for element in soup.find_all(tag):
-            if element.get(attr):
-                add_link(urljoin(base_url, element[attr]), base_url, base_domain, found_links, visited, queue)
-
-def get_link_color(link, status_codes, base_domain, domain_filter):
-    parsed = urlparse(link)
-    netloc = parsed.netloc.lower()
     
-    if netloc == base_domain:
-        color = "green"
-    elif netloc.endswith("." + base_domain):
-        color = "yellow"
-    elif domain_filter and domain_filter and domain_filter.lower() in netloc:
-        color = "yellow"
-    else:
-        color = "red"
+    while True:
+        try:
+            item = results_queue.get(timeout=1)
+            if item == "__STOP__": break
+            url, status = item
+            
+            if isinstance(status, int):
+                cat = f"{str(status)[0]}xx"
+                if cat in files: files[cat].write(f"{url},{status}\n")
+            else:
+                files["err"].write(f"{url},{status}\n")
+        except queue_module.Empty:
+            continue
+
+    for f in files.values(): f.close()
+
+# -------------------------
+# Worker
+# -------------------------
+def crawler_worker(worker_id, queue, visited, status_codes, pending_list, results_queue, base_domain, allow_subdomains, proxy_url, socks_url, headers, follow_redirect, stop_event):
+    signal.signal(signal.SIGINT, signal.SIG_IGN)
     
-    return color
+    selected_proxy = socks_url or proxy_url
+    client_args = {
+        "http2": True, 
+        "follow_redirects": follow_redirect, 
+        "verify": False, 
+        "timeout": 12, 
+        "headers": headers
+    }
+    
+    if selected_proxy:
+        client_args["proxy"] = selected_proxy
+    
+    with httpx.Client(**client_args) as client:
+        while not stop_event.is_set():
+            try:
+                url = queue.get(timeout=1)
+            except queue_module.Empty:
+                continue
 
-def write_link_to_file(link, status_codes, fd, show_status=False):
-    if show_status:
-        if link in status_codes:
-            fd.write(f"{link},{status_codes[link]}\n")
-        else:
-            fd.write(f"{link},SKIPPED\n")
+            if visited.get(url) is True:
+                if url in pending_list: pending_list.remove(url)
+                continue
+                
+            try:
+                response = client.get(url)
+                status = response.status_code
+                status_codes[url] = status
+                results_queue.put((url, status))
+                print(f"[W{worker_id}] {url} ({colored(status, get_status_color(status))})")
+                
+                content_type = response.headers.get("Content-Type", "").lower()
+                if any(x in content_type for x in ["text/", "json", "xml", "javascript"]):
+                    extract_content(response.text, content_type, url, base_domain, visited, queue, pending_list, allow_subdomains)
+                
+            except Exception as e:
+                err = f"ERROR-{type(e).__name__}"
+                status_codes[url] = err
+                results_queue.put((url, err))
+            finally:
+                visited[url] = True
+                if url in pending_list: pending_list.remove(url)
 
-    else:
-        fd.write(f"{link}\n")
-
-
+# -------------------------
+# Main
+# -------------------------
 def main():
-    parser = argparse.ArgumentParser(description="CrawlStrike - Recursive Scoped Crawler (HTTP/2)")
-    parser.add_argument("--source", action="store_true", help="Show source pages")
+    finished_cleanly = False  # Track if the crawl actually finished
+    
+    parser = argparse.ArgumentParser(description="CrawlStrike")
+    parser.add_argument("url")
+    parser.add_argument("-w","--workers", type=int, default=cpu_count())
+    parser.add_argument("--no-subdomains", action="store_true")
+    parser.add_argument("--output")
     parser.add_argument("--proxy", help="Proxy (http://127.0.0.1:8080)")
-    parser.add_argument("-f", "--domain-filter", help="Extra domain filter")
-    parser.add_argument("-sc", action="store_true", help="Generate files with identified links, grouped by status codes (i.e. 2xx.txt, 3xx.txt, error.txt)")
-    parser.add_argument("--output", help="Output folder (default: current folder)")
-    parser.add_argument("url", help="Starting URL")
+    parser.add_argument("--socks", help="SOCKS Proxy (e.g., socks5://127.0.0.1:9050)")
+    parser.add_argument("--header", action="append", help="Custom HTTP header, format: 'Key: Value'")
+    parser.add_argument("--follow-redirect", action="store_true", help="Follow redirects")
     args = parser.parse_args()
 
+    title = pyfiglet.figlet_format("CrawlStrike", font="slant")
+    print(colored(title, "green"))
+
     START_URL = args.url
-    SOURCES = args.source
-    SHOW_STATUS = args.sc
-
-
-    client_args = {
-        "http2": True,
-        "follow_redirects": True,
-        "verify": False,
-        "timeout": 10.0,
-        "headers": {
-            "User-Agent": "Mozilla/5.0"
-        }
-    }
-
-    if args.proxy:
-        proxy_url = args.proxy
-        if not proxy_url.startswith(("http://", "https://")):
-            proxy_url = "http://" + proxy_url
-        client_args["proxy"] = proxy_url
-        print(f"[+] Using proxy: {proxy_url}")
-
-    output_folder = '.'
-
-    if args.output:
-        output_folder = args.output
-        os.makedirs(output_folder, exist_ok=True)
-
-    session = httpx.Client(**client_args)
-
-    visited = set()
-    queue = deque([START_URL])
-    found_links = defaultdict(set)
-    status_codes = {}
-
+    allow_subdomains = not args.no_subdomains
     base_domain = urlparse(START_URL).netloc.lower().split(":")[0]
+    output_folder = args.output or base_domain
+    os.makedirs(output_folder, exist_ok=True)
+    
+    state_filename = (output_folder.rstrip("/\\") + ".pkl")
 
-    while queue:
-        url = queue.popleft()
+    # Header Logic
+    headers = {"User-Agent": "Mozilla/5.0"}
+    if args.header:
+        for h in args.header:
+            if ":" in h:
+                k, v = h.split(":", 1)
+                headers[k.strip()] = v.strip()
 
-        if url in visited:
-            continue
+    # Multiprocessing Setup
+    manager = Manager()
+    visited = manager.dict()
+    status_codes = manager.dict()
+    pending_list = manager.list()
+    queue = manager.Queue()
+    stop_event = manager.Event()
 
-        visited.add(url)
-        parsed = urlparse(url)
+    results_queue = Queue()
 
-        if not is_in_scope(parsed.netloc, base_domain):
-            continue
+    # Load State
+    state = load_state(state_filename)
+    if state:
+        for k, v in state["visited"].items(): visited[k] = v
+        for k, v in state["status_codes"].items(): status_codes[k] = v
+        for url in state["queue"]:
+            pending_list.append(url)
+            queue.put(url)
+    else:
+        add_link(START_URL, base_domain, visited, queue, pending_list, allow_subdomains)
 
-        try:
-            response = session.get(url)
-            status_codes[url] = response.status_code
+    # Start Processes
+    writer = Process(target=result_writer, args=(results_queue, output_folder))
+    writer.start()
 
-            sc_color = get_status_color(response.status_code)
+    workers = []
+    for i in range(args.workers):
+        p = Process(target=crawler_worker, args=(
+            i, queue, visited, status_codes, pending_list, results_queue, 
+            base_domain, allow_subdomains, args.proxy, args.socks, 
+            headers, args.follow_redirect, stop_event,
+        ))
+        p.start()
+        workers.append(p)
 
-            print(f"[+] Visiting: {url} ({colored(response.status_code, sc_color)})")
+    # Main Loop
+    try:
+        while any(p.is_alive() for p in workers):
+            time.sleep(1)
+            
+            # Check if all tasks are done
+            if queue.empty():
+                # Check if workers are actually idle (nothing left in pending that isn't visited)
+                is_working = any(visited[url] is False for url in pending_list)
+                if not is_working:
+                    time.sleep(2) # Buffer
+                    if queue.empty() and not any(visited[url] is False for url in pending_list):
+                        print(colored("\n[+] All URLs processed. Finishing...", "green"))
+                        finished_cleanly = True
+                        stop_event.set()
+                        break
 
-        except Exception as e:
-            error_text = f"ERROR - {type(e).__name__}"
-            status_codes[url] = error_text
-            print(f"[!] Visiting: {url} ({error_text})")
-            continue
+    except KeyboardInterrupt:
+        print(colored("\n[!] Ctrl+C detected! Shutting down...", "yellow"))
+        stop_event.set()
 
-        try:
-            content = response.text
-        except Exception:
-            continue
+    # Join Processes
+    for p in workers: p.join()
+    results_queue.put("__STOP__")
+    writer.join()
 
-        content_type = response.headers.get("Content-Type", "").lower()
-        
-        if any(x in content_type for x in [
-            "text/html",
-            "application/javascript",
-            "text/javascript",
-            "application/json",
-            "text/json",
-            "text/plain",
-            "application/xml",
-            "text/xml",
-        ]):
-            extract_with_regex(content, url, base_domain, found_links, visited, queue)
+    # FINAL CLEANUP LOGIC
+    if finished_cleanly:
+        print(colored(f"[+] Crawl completed successfully. Removing {state_filename}", "green"))
+        if os.path.exists(state_filename):
+            os.remove(state_filename)
+    else:
+        # If we exited because of Ctrl+C (stop_event was set but not finished_cleanly)
+        save_state(visited, status_codes, pending_list, state_filename)
 
-            if "text/html" in content_type:
-                soup = BeautifulSoup(content, "html.parser")
-                extract_with_bs4(soup, url, base_domain, found_links, visited, queue)
-
-    print("\n==== FOUND LINKS ====\n")
-
-    if SHOW_STATUS:
-        with open(os.path.join(output_folder,"2xx.txt"), "w", encoding="utf-8") as f2xx, open(os.path.join(output_folder,"3xx.txt"), "w", encoding="utf-8") as f3xx, open(os.path.join(output_folder,"error.txt"), "w", encoding="utf-8") as ferr, open(os.path.join(output_folder,"skipped.txt"), "w", encoding="utf-8") as fskip:
-            for link, sources in found_links.items():
-                parsed = urlparse(link)
-                netloc = parsed.netloc.lower()
-
-                output = link
-
-                if link in status_codes:
-                    sc = status_codes[link]
-
-                    if 200 <= sc < 300:
-                        f2xx.write(f"{link},{sc}\n")
-                    elif 300 <= sc < 400:
-                        f3xx.write(f"{link},{sc}\n")
-                    else:
-                        ferr.write(f"{link},{sc}\n")
-                else:
-                    fskip.write(f"{link},SKIPPED\n")
-
-                if SOURCES:
-                    for src in sources:
-                        print(f"\tFound on: {src}")
-
-    fds={}
-    with open(os.path.join(output_folder,"in_scope.txt"), "w", encoding="utf-8") as fds["green"], open(os.path.join(output_folder,"oos.txt"), "w", encoding="utf-8") as fds["red"], open(os.path.join(output_folder,"subdomains_filter.txt"), "w", encoding="utf-8") as fds["yellow"]:
-
-        for link, sources in found_links.items():
-            color = get_link_color(link, status_codes, base_domain, args.domain_filter)
-            write_link_to_file(link, status_codes, fds[color])
-
-            output = link
-
-            if SHOW_STATUS:
-                if link in status_codes:
-                    sc_color = get_status_color(status_codes[link])
-                    output = f"[{colored(status_codes[link], sc_color)}] {colored(link, color)}"
-
-                else:
-                    output = f"[SKIPPED] {colored(link, color)}"
-            else:
-                output = colored(link, color)
-
-            print(output)
-
-            if SOURCES:
-                for src in sources:
-                    print(f"\tFound on: {src}")
-                    fds[color].write(f"\tFound on: {src}\n")
-
-
-if __name__ == "__main__":
+if __name__=="__main__":
     main()

@@ -1,3 +1,7 @@
 httpx
+httpx[http2]
 beautifulsoup4
 termcolor
+urllib3
+pyfiglet
+httpx[socks]
