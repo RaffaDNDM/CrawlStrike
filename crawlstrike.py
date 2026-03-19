@@ -72,9 +72,8 @@ def add_link(link, base_domain, visited, queue, pending_list, allow_subdomains):
     link = normalize(link)
     parsed = urlparse(link)
     if is_in_scope(parsed.netloc, base_domain, allow_subdomains):
-        # We check the dict to see if it exists at all
         if link not in visited:
-            visited[link] = False # Mark as discovered but not processed
+            visited[link] = False 
             pending_list.append(link)
             queue.put(link)
 
@@ -116,13 +115,15 @@ def result_writer(results_queue, output_folder):
         try:
             item = results_queue.get(timeout=1)
             if item == "__STOP__": break
-            url, status = item
+            
+            url, status, size = item # Unpack 3 values
             
             if isinstance(status, int):
                 cat = f"{str(status)[0]}xx"
-                if cat in files: files[cat].write(f"{url},{status}\n")
+                if cat in files: 
+                    files[cat].write(f"{url},{status},{size}\n")
             else:
-                files["err"].write(f"{url},{status}\n")
+                files["err"].write(f"{url},{status},0\n")
         except queue_module.Empty:
             continue
 
@@ -160,9 +161,15 @@ def crawler_worker(worker_id, queue, visited, status_codes, pending_list, result
             try:
                 response = client.get(url)
                 status = response.status_code
+                
+                # Extract content length
+                content_len = response.headers.get("Content-Length")
+                if content_len is None:
+                    content_len = len(response.content)
+                
                 status_codes[url] = status
-                results_queue.put((url, status))
-                print(f"[W{worker_id}] {url} ({colored(status, get_status_color(status))})")
+                results_queue.put((url, status, content_len))
+                print(f"[W{worker_id}] {url} ({colored(status, get_status_color(status))}) [{content_len} bytes]")
                 
                 content_type = response.headers.get("Content-Type", "").lower()
                 if any(x in content_type for x in ["text/", "json", "xml", "javascript"]):
@@ -171,7 +178,7 @@ def crawler_worker(worker_id, queue, visited, status_codes, pending_list, result
             except Exception as e:
                 err = f"ERROR-{type(e).__name__}"
                 status_codes[url] = err
-                results_queue.put((url, err))
+                results_queue.put((url, err, 0))
             finally:
                 visited[url] = True
                 if url in pending_list: pending_list.remove(url)
@@ -180,7 +187,7 @@ def crawler_worker(worker_id, queue, visited, status_codes, pending_list, result
 # Main
 # -------------------------
 def main():
-    finished_cleanly = False  # Track if the crawl actually finished
+    finished_cleanly = False 
     
     parser = argparse.ArgumentParser(description="CrawlStrike")
     parser.add_argument("url")
@@ -204,7 +211,6 @@ def main():
     
     state_filename = (output_folder.rstrip("/\\") + ".pkl")
 
-    # Header Logic
     headers = {"User-Agent": "Mozilla/5.0"}
     if args.header:
         for h in args.header:
@@ -212,7 +218,6 @@ def main():
                 k, v = h.split(":", 1)
                 headers[k.strip()] = v.strip()
 
-    # Multiprocessing Setup
     manager = Manager()
     visited = manager.dict()
     status_codes = manager.dict()
@@ -222,7 +227,6 @@ def main():
 
     results_queue = Queue()
 
-    # Load State
     state = load_state(state_filename)
     if state:
         for k, v in state["visited"].items(): visited[k] = v
@@ -233,7 +237,6 @@ def main():
     else:
         add_link(START_URL, base_domain, visited, queue, pending_list, allow_subdomains)
 
-    # Start Processes
     writer = Process(target=result_writer, args=(results_queue, output_folder))
     writer.start()
 
@@ -247,17 +250,14 @@ def main():
         p.start()
         workers.append(p)
 
-    # Main Loop
     try:
         while any(p.is_alive() for p in workers):
             time.sleep(1)
             
-            # Check if all tasks are done
             if queue.empty():
-                # Check if workers are actually idle (nothing left in pending that isn't visited)
                 is_working = any(visited[url] is False for url in pending_list)
                 if not is_working:
-                    time.sleep(2) # Buffer
+                    time.sleep(2) 
                     if queue.empty() and not any(visited[url] is False for url in pending_list):
                         print(colored("\n[+] All URLs processed. Finishing...", "green"))
                         finished_cleanly = True
@@ -268,18 +268,15 @@ def main():
         print(colored("\n[!] Ctrl+C detected! Shutting down...", "yellow"))
         stop_event.set()
 
-    # Join Processes
     for p in workers: p.join()
     results_queue.put("__STOP__")
     writer.join()
 
-    # FINAL CLEANUP LOGIC
     if finished_cleanly:
         print(colored(f"[+] Crawl completed successfully. Removing {state_filename}", "green"))
         if os.path.exists(state_filename):
             os.remove(state_filename)
     else:
-        # If we exited because of Ctrl+C (stop_event was set but not finished_cleanly)
         save_state(visited, status_codes, pending_list, state_filename)
 
 if __name__=="__main__":
