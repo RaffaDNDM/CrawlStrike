@@ -11,6 +11,7 @@ import time
 from multiprocessing import Process, Manager, Queue, cpu_count, Event
 import queue as queue_module
 import pyfiglet
+from waybackpy import WaybackMachineCDXServerAPI
 
 # -------------------------
 # Constants
@@ -104,11 +105,11 @@ def result_writer(results_queue, output_folder):
     signal.signal(signal.SIGINT, signal.SIG_IGN)
     
     files = {
-        "2xx": open(os.path.join(output_folder, "2xx.txt"), "a"),
-        "3xx": open(os.path.join(output_folder, "3xx.txt"), "a"),
-        "4xx": open(os.path.join(output_folder, "4xx.txt"), "a"),
-        "5xx": open(os.path.join(output_folder, "5xx.txt"), "a"),
-        "err": open(os.path.join(output_folder, "error.txt"), "a")
+        "2xx": open(os.path.join(output_folder, "2xx.csv"), "a"),
+        "3xx": open(os.path.join(output_folder, "3xx.csv"), "a"),
+        "4xx": open(os.path.join(output_folder, "4xx.csv"), "a"),
+        "5xx": open(os.path.join(output_folder, "5xx.csv"), "a"),
+        "err": open(os.path.join(output_folder, "error.csv"), "a")
     }
     
     while True:
@@ -184,6 +185,30 @@ def crawler_worker(worker_id, queue, visited, status_codes, pending_list, result
                 if url in pending_list: pending_list.remove(url)
 
 # -------------------------
+# Wayback Integration
+# -------------------------
+def fetch_wayback_urls(domain, user_agent, base_domain, visited, queue, pending_list, allow_subdomains):
+    print(colored(f"[*] Fetching historical URLs from Wayback Machine for {domain}...", "cyan"))
+    try:
+        # Initializing the CDX API
+        cdx = WaybackMachineCDXServerAPI(domain, user_agent)
+        count = 0
+        
+        # 'record' is a CDXSnapshot object
+        for record in cdx.snapshots():
+            # Use .original to get the captured URL (e.g., https://example.com/about)
+            # Use .archive_url if you wanted the wayback machine link (https://web.archive.org/...)
+            original_url = record.original 
+            
+            if original_url:
+                add_link(original_url, base_domain, visited, queue, pending_list, allow_subdomains)
+                count += 1
+                
+        print(colored(f"[+] Added {count} URLs from Wayback Machine.", "green"))
+    except Exception as e:
+        print(colored(f"[!] Wayback Error: {e}", "red"))
+
+# -------------------------
 # Main
 # -------------------------
 def main():
@@ -198,6 +223,7 @@ def main():
     parser.add_argument("--socks", help="SOCKS Proxy (e.g., socks5://127.0.0.1:9050)")
     parser.add_argument("--header", action="append", help="Custom HTTP header, format: 'Key: Value'")
     parser.add_argument("--follow-redirect", action="store_true", help="Follow redirects")
+    parser.add_argument("--wayback", action="store_true", help="Wayback URLs")
     args = parser.parse_args()
 
     title = pyfiglet.figlet_format("CrawlStrike", font="slant")
@@ -211,7 +237,8 @@ def main():
     
     state_filename = (output_folder.rstrip("/\\") + ".pkl")
 
-    headers = {"User-Agent": "Mozilla/5.0"}
+    user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"
+    headers = {"User-Agent": user_agent}
     if args.header:
         for h in args.header:
             if ":" in h:
@@ -236,6 +263,9 @@ def main():
             queue.put(url)
     else:
         add_link(START_URL, base_domain, visited, queue, pending_list, allow_subdomains)
+
+        if args.wayback:
+            fetch_wayback_urls(base_domain, user_agent, base_domain, visited, queue, pending_list, allow_subdomains)
 
     writer = Process(target=result_writer, args=(results_queue, output_folder))
     writer.start()

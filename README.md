@@ -7,7 +7,7 @@
   - Regex-based discovery in `javascript`, `json`, `xml`, and `txt` for absolute/relative paths.
 - **Resumable Scans:** Automated state saving to `.pkl` files. If a scan is interrupted with `Ctrl+C`, you can resume exactly where you left off by starting again the script with the same parameters.
 - **Flexible Proxying:** Native support for both **HTTP** and **SOCKS5** (e.g., Tor integration).
-- **Categorized Logging:** Automatically sorts findings into `2xx.txt`, `3xx.txt`, `4xx.txt`, `5xx.txt`, and `error.txt`.
+- **Categorized Logging:** Automatically sorts findings into `2xx.csv`, `3xx.csv`, `4xx.csv`, `5xx.csv`, and `error.csv`.
 
 ## Installation
 ```bash
@@ -26,13 +26,14 @@ python3 crawlstrike.py [URL] [OPTIONS]
 ### Arguments
 | **Argument** | **Description** |
 | ------------ | --------------- |
-| `-w`, `--workers` | Number of parallel processes (Default: CPU count) |
+| `--follow-redirect`| Follow HTTP redirects (3xx) |
+| `--header` | Add custom HTTP headers (Format: `"Key: Value"`) |
+| `--no-subdomains` | Restrict crawl strictly to the main domain |
+| `--output` | Specify output folder (Defaults to domain name) |
 | `--proxy` | HTTP/HTTPS proxy (`http://127.0.0.1:8080`)<br>If SOCKS5 proxy is defined, HTTP proxy will be disabled. |
 | `--socks` | SOCKS proxy (`socks5://127.0.0.1:9050`)|
-| `--no-subdomains` | Restrict crawl strictly to the main domain |
-| `--header` | Add custom HTTP headers (Format: `"Key: Value"`) |
-| `--follow-redirect`| Follow HTTP redirects (3xx) |
-| `--output` | Specify output folder (Defaults to domain name) |
+| `-w`, `--workers` | Number of parallel processes (Default: CPU count) |
+| `--wayback` | Retrieve Wayback Machine URLs at the beginning and use them as additional input |
 
 ### Examples
 ```bash
@@ -54,11 +55,11 @@ python3 crawlstrike.py https://target.com -w 20
 
 ```bash
 target.com/             <-- Default Folder
-├── 2xx.txt             # Successes
-├── 3xx.txt             # Redirects
-├── 4xx.txt             # Client Errors (404, etc.)
-├── 5xx.txt             # Server Errors
-└── error.txt           # Network/Proxy/SOCKS Failures
+├── 2xx.csv             # Successes
+├── 3xx.csv             # Redirects
+├── 4xx.csv             # Client Errors (404, etc.)
+├── 5xx.csv             # Server Errors
+└── error.csv           # Network/Proxy/SOCKS Failures
 target.com.pkl          # Session state (for resuming)
 ```
 
@@ -69,16 +70,16 @@ python3 crawlstrike.py https://target.com -w 20 --output myscan
 
 ```bash
 myscan/             <-- Default Folder
-├── 2xx.txt             # Successes
-├── 3xx.txt             # Redirects
-├── 4xx.txt             # Client Errors (404, etc.)
-├── 5xx.txt             # Server Errors
-└── error.txt           # Network/Proxy/SOCKS Failures
+├── 2xx.csv             # Successes
+├── 3xx.csv             # Redirects
+├── 4xx.csv             # Client Errors (404, etc.)
+├── 5xx.csv             # Server Errors
+└── error.csv           # Network/Proxy/SOCKS Failures
 myscan.pkl          # Session state (for resuming)
 ```
 
-### Error Handling (`error.txt`)
-The `error.txt` file captures non-HTTP network failures:
+### Error Handling (`error.csv`)
+The `error.csv` file captures non-HTTP network failures:
 * **Network:** `ConnectError`, `ConnectTimeout` (DNS or Firewall issues).
 * **Protocol:** `SSLError`, `ProtocolError` (Encryption/Handshake failures).
 * **Streaming:** `ReadTimeout`, `ReadError` (Interrupted data transfer).
